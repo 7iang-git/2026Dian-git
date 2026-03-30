@@ -1,0 +1,18 @@
+# ESP-IDF 组件依赖配置
+# 定义项目依赖的组件
+
+dependencies:
+  # ESP-DL: 乐鑫深度学习库
+  # 用于加载和运行 ESPDL 格式的量化模型
+  espressif/esp-dl:
+    version: ">=3.0.0"
+    # 可选：指定组件仓库
+    # registry_url: https://components.espressif.com
+
+  # ESP-TFLite-Micro: TensorFlow Lite for Microcontrollers (备用)
+  # espressif/esp-tflite-micro:
+  #   version: ">=1.0.0"
+
+  # 其他可能需要的依赖
+  # espressif/esp-nn: 神经网络加速库
+  # espressif/esp32-camera: 如果需要摄像头输入
