@@ -97,8 +97,8 @@ static void play_current_song(void);
 static void pause_current_song(void);
 static void resume_current_song(void);
 static void stop_current_song(void);
-static void next_song(void);
-static void prev_song(void);
+static void next_song(bool auto_advance);
+static void prev_song(bool auto_advance);
 static void set_volume(uint8_t vol);
 static void process_uart_command(const char *cmd);
 static void uart_task(void *pvParameters);
@@ -388,6 +388,8 @@ static void play_current_song(void)
     if (g_ctx.current_file == NULL) {
         ESP_LOGE(TAG, "Failed to open: %s", song->path);
         printf("ERROR: Cannot open file %s\r\n", song->name);
+        // 文件打开失败，停止播放
+        g_ctx.state = PLAY_STATE_STOPPED;
         return;
     }
 
@@ -503,9 +505,25 @@ static void stop_current_song(void)
 static bool g_switching_song = false;
 
 // 下一首
-static void next_song(void)
+static void next_song(bool auto_advance)
 {
-    if (g_ctx.song_count == 0 || g_switching_song) return;
+    if (g_ctx.song_count == 0) return;
+
+    // 如果正在切歌
+    if (g_switching_song) {
+        // 如果是自动切歌（歌曲自然结束），等待一小段时间
+        if (auto_advance) {
+            int wait_count = 0;
+            while (g_switching_song && wait_count < 5) {
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+                wait_count++;
+            }
+            // 如果等待后锁仍然存在，强制继续（这是自动切歌）
+        } else {
+            // 用户手动切歌，直接返回
+            return;
+        }
+    }
 
     g_switching_song = true;
 
@@ -529,9 +547,14 @@ static void next_song(void)
     }
 
     // 保存当前歌曲的播放位置（如果正在播放或暂停）
+    // 如果是自动切歌（歌曲自然结束），不保存位置（或保存为0）
     if (old_state == PLAY_STATE_PLAYING || old_state == PLAY_STATE_PAUSED) {
-        g_ctx.song_positions[g_ctx.current_song_index] = g_ctx.current_position_ms;
-        ESP_LOGI(TAG, "Saved position for song %d: %lu ms", g_ctx.current_song_index, (unsigned long)g_ctx.current_position_ms);
+        // 如果是自动切歌，表示歌曲播放完毕，重置位置为0
+        // 否则保存当前位置用于断点续播
+        uint32_t position_to_save = auto_advance ? 0 : g_ctx.current_position_ms;
+        g_ctx.song_positions[g_ctx.current_song_index] = position_to_save;
+        ESP_LOGI(TAG, "Saved position for song %d: %lu ms (auto_advance=%d)",
+                 g_ctx.current_song_index, (unsigned long)position_to_save, auto_advance);
         save_playback_position();
     }
 
@@ -557,9 +580,25 @@ static void next_song(void)
 }
 
 // 上一首
-static void prev_song(void)
+static void prev_song(bool auto_advance)
 {
-    if (g_ctx.song_count == 0 || g_switching_song) return;
+    if (g_ctx.song_count == 0) return;
+
+    // 如果正在切歌
+    if (g_switching_song) {
+        // 如果是自动切歌，等待一小段时间
+        if (auto_advance) {
+            int wait_count = 0;
+            while (g_switching_song && wait_count < 5) {
+                vTaskDelay(20 / portTICK_PERIOD_MS);
+                wait_count++;
+            }
+            // 如果等待后锁仍然存在，强制继续（这是自动切歌）
+        } else {
+            // 用户手动切歌，直接返回
+            return;
+        }
+    }
 
     g_switching_song = true;
 
@@ -583,9 +622,14 @@ static void prev_song(void)
     }
 
     // 保存当前歌曲的播放位置（如果正在播放或暂停）
+    // 如果是自动切歌，重置位置为0（虽然prev_song通常不会被自动调用）
     if (old_state == PLAY_STATE_PLAYING || old_state == PLAY_STATE_PAUSED) {
-        g_ctx.song_positions[g_ctx.current_song_index] = g_ctx.current_position_ms;
-        ESP_LOGI(TAG, "Saved position for song %d: %lu ms", g_ctx.current_song_index, (unsigned long)g_ctx.current_position_ms);
+        // 如果是自动切歌，表示歌曲播放完毕，重置位置为0
+        // 否则保存当前位置用于断点续播
+        uint32_t position_to_save = auto_advance ? 0 : g_ctx.current_position_ms;
+        g_ctx.song_positions[g_ctx.current_song_index] = position_to_save;
+        ESP_LOGI(TAG, "Saved position for song %d: %lu ms (auto_advance=%d)",
+                 g_ctx.current_song_index, (unsigned long)position_to_save, auto_advance);
         save_playback_position();
     }
 
@@ -716,10 +760,10 @@ static void process_uart_command(const char *cmd)
         stop_current_song();
     }
     else if (strcasecmp(cmd_start, "next") == 0) {
-        next_song();
+        next_song(false);
     }
     else if (strcasecmp(cmd_start, "prev") == 0) {
-        prev_song();
+        prev_song(false);
     }
     else if (strcasecmp(cmd_start, "list") == 0) {
         show_playlist();
@@ -834,11 +878,11 @@ static void button_task(void *pvParameters)
                             break;
                         case 1:
                             ESP_LOGI(TAG, "Button: Next");
-                            next_song();
+                            next_song(false);
                             break;
                         case 2:
                             ESP_LOGI(TAG, "Button: Previous");
-                            prev_song();
+                            prev_song(false);
                             break;
                         case 3:
                             ESP_LOGI(TAG, "Button: Volume Up");
@@ -1100,7 +1144,10 @@ static void play_wav_file(FILE *file)
             ESP_LOGI(TAG, "End of file reached, total samples: %d", total_samples);
             // 歌曲播放完成，清零该歌曲的保存位置
             g_ctx.song_positions[g_ctx.current_song_index] = 0;
-            next_song();
+            // 同时重置当前播放位置为0，确保状态一致
+            g_ctx.current_position_ms = 0;
+            // 歌曲自然结束，自动切换到下一首
+            next_song(true);
             break;
         }
 
@@ -1148,7 +1195,7 @@ static void audio_task(void *pvParameters)
                 ESP_LOGW(TAG, "MP3 decoding not implemented in this version, use WAV files");
                 printf("Note: This version only supports WAV files\r\n");
                 vTaskDelay(3000 / portTICK_PERIOD_MS);
-                next_song();
+                next_song(true);
             }
         } else {
             vTaskDelay(50 / portTICK_PERIOD_MS);
